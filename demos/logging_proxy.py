@@ -27,16 +27,16 @@ class LoggingSession(maproxy.session.Session):
     -  on_p2s_done_read    : C<-S data
     -  on_c2p_close        : Client closes he connection
     -  on_p2s_close        : Server closes he connection
-    
+
     """
-    
+
     # Class variable: counter for the number of connections
     running_counter=0
-    
-    
+
+
     def __init__(self,*args,**kwargs):
         """
-        Currently overriding the "__init__" is not really required since the parent's 
+        Currently overriding the "__init__" is not really required since the parent's
         __init__ is doing absolutely nothing, but it is a good practice for
         the future... (future updates)
         """
@@ -58,7 +58,7 @@ class LoggingSession(maproxy.session.Session):
     def on_p2s_done_connect(self):
         """
         Override the maproxy.session.Session.on_p2s_done_connect() function
-        This function is called by the framework (proxyserver) when the session is 
+        This function is called by the framework (proxyserver) when the session is
         connected to the target-server
         """
         print("#%-3d: Server connected" % (self.connid))
@@ -69,7 +69,7 @@ class LoggingSession(maproxy.session.Session):
     def on_c2p_done_read(self,data):
         """
         Override the maproxy.session.Session.on_c2p_done_read(data) function
-        This function is called by the framework (proxyserver) when we get data from the client 
+        This function is called by the framework (proxyserver) when we get data from the client
         (to the target-server)
         """
         # First, let's call the parent-class function (on_cp2_done_read),
@@ -78,21 +78,21 @@ class LoggingSession(maproxy.session.Session):
 
         # Now let simply print the data (print just the printable characters)
         print("#%-3d:C->S (%d bytes):\n%s" % (self.connid,len(data),filter(lambda x: x in string.printable, data)) )
-        
+
 
     def on_p2s_done_read(self,data):
         """
         Override the maproxy.session.Session.on_p2s_done_read(data) function
-        This function is called by the framework (proxyserver) when we get data from the server 
+        This function is called by the framework (proxyserver) when we get data from the server
         (to the client)
         """
         # First, let's call the parent-class function (on_p2s_done_read),
         # this will minimize network delay and complete the operation
         super(LoggingSession,self).on_p2s_done_read(data)
-        
+
         # Now let simply print the data (print just the printable characters)
-        print("#%-3d:C<-S (%d bytes):\n%s" % (self.connid,len(data),filter(lambda x: x in string.printable, data)) )
-    
+        #print("#%-3d:C<-S (%d bytes):\n%s" % (self.connid,len(data),filter(lambda x: x in string.printable, data)) )
+
     def on_c2p_close(self):
         """
         Override the maproxy.session.Session.on_c2p_close() function.
@@ -108,7 +108,7 @@ class LoggingSession(maproxy.session.Session):
         """
         print("#%-3d: C<-S Closed" % (self.connid))
         super(LoggingSession,self).on_p2s_close()
-        
+
 
 
 
@@ -126,16 +126,20 @@ class LoggingSessionFactory(maproxy.session.SessionFactory):
         super(LoggingSessionFactory,self).__init__()
     def new(self,*args,**kwargs):
         return LoggingSession(*args,**kwargs)
-        
 
 
 
-# HTTP->HTTP
-# On your computer, browse to "http://127.0.0.1:81/" and you'll get http://www.google.com
-# The only "special" argument is the "session_factory" that ponits to a new instance of LoggingSessionFactory.
-# By using our special session-factory, the proxy will create the 
-# LoggingSession instances (instead of default Session instances)
-server = maproxy.proxyserver.ProxyServer("www.google.com",80,session_factory=LoggingSessionFactory())
-server.listen(81)
-print("http://127.0.0.1:81 -> http://www.google.com")    
-tornado.ioloop.IOLoop.instance().start()
+def main():
+
+    # HTTP->HTTP
+    # On your computer, browse to "http://127.0.0.1:81/" and you'll get http://www.google.com
+    # The only "special" argument is the "session_factory" that ponits to a new instance of LoggingSessionFactory.
+    # By using our special session-factory, the proxy will create the
+    # LoggingSession instances (instead of default Session instances)
+    server = maproxy.proxyserver.ProxyServer("www.google.com",80,session_factory=LoggingSessionFactory())
+    server.listen(81)
+    print("http://127.0.0.1:81 -> http://www.google.com")
+    tornado.ioloop.IOLoop.instance().start()
+
+if __name__ == "__main__":
+    main()

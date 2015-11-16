@@ -4,6 +4,8 @@ import tornado
 import socket
 import maproxy.proxyserver
 
+from tornado.escape import native_str
+import tornado.httputil
 
 
 class Session(object):
@@ -20,18 +22,18 @@ class Session(object):
           When we get data from one side, we initiate a "start_write" to the other side .
           Exception: if the target is not connected yet, we queue the data so we can send it later
         - on_p2s_connected:
-          When p2s is connected ,we start read from the server . 
+          When p2s is connected ,we start read from the server .
           if queued data is available (data that was sent from the c2p) we initiate a "start_write" immediately
         - on_XXX_done_write:
-          When we're done "sending" data , we check if there's more data to send in the queue. 
+          When we're done "sending" data , we check if there's more data to send in the queue.
           if there is - we initiate another "start_write" with the queued data
         - on_XXX_close:
           When one side closes the connection, we either initiate a "start_close" on the other side, or (if already closed) - remove the session
     - I/O routings:
         - XXX_start_read: simply start read from the socket (we assume and validate that only one read goes at a time)
         - XXX_start_write: if currently writing , add data to queue. if not writing - perform io_write...
-        
-    
+
+
 
 
     """
@@ -49,34 +51,34 @@ class Session(object):
         LOG_CLOSE_OP=False
         LOG_CONNECT_OP=False
         LOG_REMOVE_SESSION=False
-        
+
     class State:
         """
         Each socket has a state.
         We will use the state to identify whether the connection is open or closed
         """
         CLOSED,CONNECTING,CONNECTED=range(3)
-    
+
     def __init__(self):
         pass
     #def new_connection(self,stream : tornado.iostream.IOStream ,address,proxy):
     def new_connection(self,stream ,address,proxy):
             # First,validation
-            assert isinstance(proxy,maproxy.proxyserver.ProxyServer) 
+            assert isinstance(proxy,maproxy.proxyserver.ProxyServer)
             assert isinstance(stream,tornado.iostream.IOStream)
-            
+
             # Logging
             self.logger_nesting_level=0         # logger_nesting_level is the current "nesting level"
             if Session.LoggerOptions.LOG_NEW_SESSION_OP:
                 self.log("New Session")
 
-            
-            # Remember our "parent" ProxyServer 
+
+            # Remember our "parent" ProxyServer
             self.proxy=proxy
 
             # R/W flags for each socket
             # Using the flags, we can tell if we're waiting for I/O completion
-            # NOTE: the "c2p" and "p2s" prefixes are NOT the direction of the IO, 
+            # NOTE: the "c2p" and "p2s" prefixes are NOT the direction of the IO,
             #       they represent the SOCKETS :
             #       c2p means the socket from the client to the proxy
             #       p2s means the socket from the proxy to the server
@@ -90,7 +92,7 @@ class Session(object):
             self.c2p_address=address
             # Client->Proxy  is connected
             self.c2p_state=Session.State.CONNECTED
-            
+
             # Here we will put incoming data while we're still waiting for the target-server's connection
             self.c2s_queued_data=[] # Data that was read from the Client, and needs to be sent to the  Server
             self.s2c_queued_data=[] # Data that was read from the Server , and needs to be sent to the  client
@@ -102,7 +104,7 @@ class Session(object):
 
             # Create the Proxy->Server socket and stream
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM, 0)
-            
+
             if self.proxy.server_ssl_options is not None:
                 # if the "server_ssl_options" where specified, it means that when we connect, we need to wrap with SSL
                 # so we need to use the SSLIOStream stream
@@ -112,24 +114,24 @@ class Session(object):
                 self.p2s_stream = tornado.iostream.IOStream(s)
             # send data immediately to the server... (Disable Nagle TCP algorithm)
             self.p2s_stream.set_nodelay(True)
-            
+
             # Let us now when the server disconnects (callback on_p2s_close)
             self.p2s_stream.set_close_callback(  self.on_p2s_close )
             # P->S state is "connecting"
             self.p2s_state=self.p2s_state=Session.State.CONNECTING
             self.p2s_stream.connect(( proxy.target_server, proxy.target_port),  self.on_p2s_done_connect )
-            
+
 
             # We can actually start reading immediatelly from the C->P socket
             self.c2p_start_read()
-    
+
     # Each member-function can call this method to log data (currently to screen)
     def log(self,msg):
         prefix=str(id(self))+":" if Session.LoggerOptions.LOG_SESSION_ID else ""
         prefix+=self.logger_nesting_level*" "*4
         logging.debug(prefix + msg)
-        
-        
+
+
 
     #  Logging decorator (enter/exit)
     def logger(enabled=True):
@@ -138,13 +140,13 @@ class Session(object):
         Since this decorator accepts a parameter, it must return an "inner" decorator....(Python stuff)
         """
         def inner_decorator(func):
-            
-        
+
+
             def log_wrapper(self,*args,**kwargs):
 
                 msg="%s (%s,%s)" % (func.__name__,args,kwargs)
 
-            
+
                 self.log(msg)
                 self.logger_nesting_level+=1
                 r=func(self,*args,**kwargs)
@@ -152,12 +154,12 @@ class Session(object):
                 self.log("%s -> %s" % (msg,str(r)) )
                 return r
             return log_wrapper if enabled else func
-            
+
 
         return inner_decorator
 
-        
-        
+
+
     ################
     ## Start Read ##
     ################
@@ -168,8 +170,9 @@ class Session(object):
         """
         assert( not self.c2p_reading)
         self.c2p_reading=True
+
         try:
-            self.c2p_stream.read_until_close(lambda x: None,self.on_c2p_done_read)
+            self.c2p_stream.read_until(b"\r\n\r\n", callback=self.on_c2p_done_header_read)
         except tornado.iostream.StreamClosedError:
             self.c2p_reading=False
 
@@ -182,21 +185,69 @@ class Session(object):
         self.p2s_reading=True
         try:
             self.p2s_stream.read_until_close(lambda x:None,self.on_p2s_done_read)
-        except tornado.iostream.StreamClosedError:    
+        except tornado.iostream.StreamClosedError:
             self.p2s_reading=False
-    
-    
+
+
     ##############################
     ## Read Completion Routines ##
     ##############################
+
+    @logger(LoggerOptions.LOG_READ_OP)
+    def on_c2p_done_header_read(self, data):
+        #assert(self.c2p_reading)
+        assert(data)
+
+#        print data
+        #self.log(data)
+        new_headers = self.munge_headers(data)
+        print 'new_headers'
+        print new_headers
+
+        # setup the next read callback
+        try:
+            self.c2p_stream.read_until_close(lambda x: None, self.on_c2p_done_read)
+        except tornado.iostream.StreamClosedError:
+            self.c2p_reading=False
+        self.p2s_start_write(new_headers)
+
+    def munge_headers(self, data):
+        start_line, headers = self._parse_headers(data)
+        headers['Host'] = 'cdn.redhat.com'
+        if 'Referer' in headers:
+            headers['Referer'] = self.munge_referer(headers['Referer'])
+
+        return '%s\n%s\r\n\r\n' % (start_line,
+                                   '\n'.join(['%s: %s' % (k, v) for k, v in headers.get_all()]))
+
+    def munge_referer(self, referer):
+        return referer.replace('http://127.0.0.1:85', 'https://cdn.redhat.com')
+
+    # From tornado http1connection.py
+    def _parse_headers(self, data):
+        data = native_str(data.decode('latin1')).lstrip("\r\n")
+        # RFC 7230 section allows for both CRLF and bare LF.
+        eol = data.find("\n")
+        start_line = data[:eol].rstrip("\r")
+        try:
+            headers = tornado.httputil.HTTPHeaders.parse(data[eol:])
+        except ValueError:
+            # probably form split() if there was no ':' in the line
+            raise tornado.httputil.HTTPInputError("Malformed HTTP headers: %r" %
+                                                  data[eol:100])
+        return start_line, headers
+
+
+
+
     @logger(LoggerOptions.LOG_READ_OP)
     def on_c2p_done_read(self,data):
         # # We got data from the client (C->P ) . Send data to the server
-        assert(self.c2p_reading)
-        assert(data)
+        #assert(self.c2p_reading)
+        #assert(data)
         self.p2s_start_write(data)
-        
-        
+
+
     @logger(LoggerOptions.LOG_READ_OP)
     def on_p2s_done_read(self,data):
         # got data from Server to Proxy . if the client is still connected - send the data to the client
@@ -257,13 +308,13 @@ class Session(object):
         if not self.c2p_writing:
             # If we're not currently writing
             assert( not self.s2c_queued_data ) # we expect the  queue to be empty
-            
+
             # Start the "real" write I/O operation
             self._c2p_io_write(data)
         else:
             # Just add to the queue
             self.s2c_queued_data.append(data)
-    
+
     @logger(LoggerOptions.LOG_WRITE_OP)
     def p2s_start_write(self,data):
         """
@@ -271,16 +322,16 @@ class Session(object):
         If not connected yet - queue the data
         If there's a pending write-operation , add it to the C->S (c2s) queue
         """
-        
+
         # If still connecting to the server - queue the data...
-        if self.p2s_state == Session.State.CONNECTING:  
+        if self.p2s_state == Session.State.CONNECTING:
             self.c2s_queued_data.append(data)   # TODO: is it better here to append (to list) or concatenate data (to buffer) ?
             return
         # If not connected - do nothing
-        if self.p2s_state == Session.State.CLOSED:  
+        if self.p2s_state == Session.State.CLOSED:
             return
         assert(self.p2s_state == Session.State.CONNECTED)
-        
+
         if not self.p2s_writing:
             # Start the "real" write I/O operation
             self._p2s_io_write(data)
@@ -288,7 +339,7 @@ class Session(object):
             # Just add to the queue
             self.c2s_queued_data.append(data)
 
-    
+
     ##############################
     ## Write Competion Routines ##
     ##############################
@@ -304,9 +355,9 @@ class Session(object):
             self._c2p_io_write( self.s2c_queued_data.pop(0))
             return
         self.c2p_writing=False
-        
-    
-        
+
+
+
     @logger(LoggerOptions.LOG_WRITE_OP)
     def on_p2s_done_write(self):
         """
@@ -319,7 +370,7 @@ class Session(object):
             self._p2s_io_write( self.c2s_queued_data.pop(0))
             return
         self.p2s_writing=False
-        
+
 
 
     ######################
@@ -334,7 +385,7 @@ class Session(object):
             - mark the stream is closed
             - we "reset" (empty) the queued-data
             - if the other side (p->s) already closed, remove the session
-        
+
         """
         if self.c2p_state == Session.State.CLOSED:
             return
@@ -347,8 +398,8 @@ class Session(object):
         self.c2p_stream.close()
         if self.p2s_state == Session.State.CLOSED:
             self.remove_session()
-            
-            
+
+
     @logger(LoggerOptions.LOG_CLOSE_OP)
     def p2s_start_close(self,gracefully=True):
         """
@@ -358,7 +409,7 @@ class Session(object):
             - mark the stream is closed
             - we "reset" (empty) the queued-data
             - if the other side (p->s) already closed, remove the session
-        
+
         """
         if self.p2s_state == Session.State.CLOSED:
             return
@@ -371,7 +422,7 @@ class Session(object):
         self.p2s_stream.close()
         if self.c2p_state == Session.State.CLOSED:
             self.remove_session()
-        
+
 
     @logger(LoggerOptions.LOG_CLOSE_OP)
     def on_c2p_close(self):
@@ -387,7 +438,7 @@ class Session(object):
             self.remove_session()
         else:
             self.p2s_start_close(gracefully=True)
-            
+
 
     @logger(LoggerOptions.LOG_CLOSE_OP)
     def on_p2s_close(self):
@@ -400,7 +451,7 @@ class Session(object):
             self.remove_session()
         else:
             self.c2p_start_close(gracefully=True)
-        
+
     ########################
     ## Connect-Completion ##
     ########################
@@ -411,14 +462,14 @@ class Session(object):
         # Start reading from the socket
         self.p2s_start_read()
         assert(not self.p2s_writing)    # As expect no current write-operation ...
-        
+
         # If we have pending-data to write, start writing...
         if self.c2s_queued_data:
             # TRICKY: get thte frst item , and write it...
-            # this is tricky since the "start-write" will 
+            # this is tricky since the "start-write" will
             # write this item even if there are queued-items... (since self.p2s_writing=False)
             self.p2s_start_write( self.c2s_queued_data.pop(0)  )
-    
+
     ###########
     ## UTILS ##
     ###########
@@ -433,7 +484,7 @@ class SessionFactory(object):
     """
     def __init__(self):
         pass
-        
+
     def new(self,*args,**kwargs):
         """
         The caller needs a Session objet (constructed with *args,**kwargs).
@@ -446,4 +497,4 @@ class SessionFactory(object):
         """
         assert( isinstance(session,Session))
         del session
-        
+
